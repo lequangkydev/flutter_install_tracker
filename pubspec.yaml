@@ -17,10 +17,15 @@ dependencies:
   shared_preferences: ^2.2.0
   # Telemetry (optional lúc runtime — không bật InstallTrackerTelemetryConfig
   # thì không call tới; nhưng dep vẫn cần khai báo vì Dart import tĩnh).
-  firebase_analytics: ^11.0.0
-  cloud_firestore: ^5.0.0
-  device_info_plus: ">=9.0.0 <12.0.0"
-  package_info_plus: ">=8.0.0 <9.0.0"
+  #
+  # Constraint để RỘNG chủ đích: lib chỉ dùng API ổn định qua nhiều major
+  # (logEvent/setUserProperty/appInstanceId, collection/doc/batch,
+  # androidInfo, PackageInfo.fromPlatform) — mỗi app tự pin version cụ thể,
+  # lib không được là nguồn conflict khi các app dùng version khác nhau.
+  firebase_analytics: ">=11.0.0 <13.0.0"
+  cloud_firestore: ">=5.0.0 <7.0.0"
+  device_info_plus: ">=9.0.0 <13.0.0"
+  package_info_plus: ">=8.0.0 <12.0.0"
 
 dev_dependencies:
   flutter_test:
