@@ -71,7 +71,7 @@ class InstallTrackerTelemetry {
     required int totalDurationMs,
     required int referrerFetchMs,
   }) async {
-    // ---- 1. Analytics ----
+    // ---- 1. Analytics: timing MỌI launch (aggregate median/p95) ----
     if (config.analyticsEnabled) {
       try {
         // User property → segment audience trong GA4 theo nguồn cài.
@@ -89,113 +89,144 @@ class InstallTrackerTelemetry {
             'is_full_ads': isFullAds.toString(),
           },
         );
-        // install_source: đúng 1 lần cho cả đời install.
-        if (!attribution.fromCache) {
-          await FirebaseAnalytics.instance.logEvent(
-            name: 'install_source',
-            parameters: {
-              'network': attribution.network,
-              'is_full_ads': isFullAds.toString(),
-              // Firebase giới hạn param value 100 ký tự.
-              if (attribution.referrer != null)
-                'referrer': attribution.referrer!.length > 100
-                    ? attribution.referrer!.substring(0, 100)
-                    : attribution.referrer!,
-            },
-          );
-        }
         debugPrint(
-            '[InstallTracker] 📊 Analytics đã gửi (total=${totalDurationMs}ms, '
+            '[InstallTracker] 📊 Analytics timing đã gửi (total=${totalDurationMs}ms, '
             'fetch=${referrerFetchMs}ms)');
       } catch (e) {
-        debugPrint('[InstallTracker] ✖ analytics failed: $e');
+        debugPrint('[InstallTracker] ✖ analytics timing failed: $e');
       }
     }
 
-    // ---- 2. Firestore: chỉ lần resolve đầu (1 write / install) ----
-    if (!config.firestoreEnabled) {
-      return;
-    }
-    if (attribution.fromCache) {
+    // ---- 2. Firestore (chỉ lần resolve đầu) + xác định install MỚI thật ----
+    // isNewInstall = doc install chưa tồn tại. Đây là NGUỒN SỰ THẬT DUY NHẤT
+    // dùng cho cả (a) +1 counter và (b) event install_source, nên hai số liệu
+    // này không bao giờ lệch nhau — và không đếm trùng khi cache-miss lặp lại
+    // (persist fail / process chết) hay app-data-clear.
+    bool isNewInstall = false;
+
+    if (config.firestoreEnabled && !attribution.fromCache) {
+      try {
+        final deviceInfo = DeviceInfoPlugin();
+        String deviceId = 'unknown';
+        final Map<String, Object?> deviceMeta = {};
+        if (Platform.isAndroid) {
+          final android = await deviceInfo.androidInfo;
+          deviceId = android.id;
+          deviceMeta.addAll({
+            'model': android.model,
+            'manufacturer': android.manufacturer,
+            'brand': android.brand,
+            'sdkInt': android.version.sdkInt,
+            'androidVersion': android.version.release,
+            'isPhysicalDevice': android.isPhysicalDevice,
+          });
+        }
+
+        final packageInfo = await PackageInfo.fromPlatform();
+        // Pseudo user id của Firebase Analytics — join được với event/GA4.
+        final appInstanceId = await FirebaseAnalytics.instance.appInstanceId;
+
+        // Doc id ngày theo [config.dayUtcOffset]: '2026-08-17'.
+        final now = DateTime.now().toUtc().add(config.dayUtcOffset);
+        final dateId = '${now.year.toString().padLeft(4, '0')}-'
+            '${now.month.toString().padLeft(2, '0')}-'
+            '${now.day.toString().padLeft(2, '0')}';
+
+        final firestore = FirebaseFirestore.instance;
+        final dayDoc =
+            firestore.collection(config.firestoreCollection).doc(dateId);
+        final installDoc = dayDoc.collection('installs').doc(deviceId);
+
+        // Transaction đọc-rồi-ghi NGUYÊN TỬ: chỉ +1 counter khi doc install
+        // chưa tồn tại. Batch cũ +1 vô điều kiện → installCount phồng hơn số
+        // install thật; transaction bảo đảm installCount == số doc installs/.
+        isNewInstall = await firestore.runTransaction<bool>((tx) async {
+          final snap = await tx.get(installDoc);
+          final isNew = !snap.exists;
+
+          tx.set(
+            installDoc,
+            {
+              'deviceId': deviceId,
+              'appInstanceId': appInstanceId,
+              // Kết quả tracker
+              'network': attribution.network,
+              'referrer': attribution.referrer,
+              'isFullAds': isFullAds,
+              // Timing
+              'totalDurationMs': totalDurationMs,
+              'referrerFetchMs': referrerFetchMs,
+              // Device
+              'device': deviceMeta,
+              // App
+              'appVersion': packageInfo.version,
+              'buildNumber': packageInfo.buildNumber,
+              'packageName': packageInfo.packageName,
+              if (config.flavor != null) 'flavor': config.flavor,
+              // Context
+              'locale': Platform.localeName,
+              'timezone': DateTime.now().timeZoneName,
+              // createdAt CHỈ ghi lần đầu — resolve lại không ghi đè thời điểm
+              // cài gốc; updatedAt luôn cập nhật để biết lần chạm gần nhất.
+              if (isNew) 'createdAt': FieldValue.serverTimestamp(),
+              'updatedAt': FieldValue.serverTimestamp(),
+              ...config.extraFields,
+            },
+            SetOptions(merge: true),
+          );
+
+          if (isNew) {
+            tx.set(
+              dayDoc,
+              {
+                'date': dateId,
+                'installCount': FieldValue.increment(1),
+                'updatedAt': FieldValue.serverTimestamp(),
+              },
+              SetOptions(merge: true),
+            );
+          }
+          return isNew;
+        }).timeout(const Duration(seconds: 10));
+
+        debugPrint('[InstallTracker] 🔥 Firestore '
+            '${isNewInstall ? 'NEW (+1)' : 'đã tồn tại → không +1'} → '
+            '${config.firestoreCollection}/$dateId/installs/$deviceId');
+      } catch (e) {
+        // Fail-closed: lỗi firestore → isNewInstall giữ false → không bắn
+        // install_source lần này (thà thiếu còn hơn đếm trùng).
+        debugPrint('[InstallTracker] ✖ firestore failed: $e '
+            '(check đã tạo database + publish rules chưa)');
+      }
+    } else if (attribution.fromCache) {
       debugPrint(
           '[InstallTracker] 🔥 Firestore skip — fromCache=true (chỉ ghi lần resolve đầu)');
-      return;
+    } else {
+      // Firestore tắt nhưng vẫn resolve lần đầu → không có doc để dedupe,
+      // dựa vào cờ fromCache như trước để vẫn bắn install_source 1 lần.
+      isNewInstall = true;
     }
-    try {
-      final deviceInfo = DeviceInfoPlugin();
-      String deviceId = 'unknown';
-      final Map<String, Object?> deviceMeta = {};
-      if (Platform.isAndroid) {
-        final android = await deviceInfo.androidInfo;
-        deviceId = android.id;
-        deviceMeta.addAll({
-          'model': android.model,
-          'manufacturer': android.manufacturer,
-          'brand': android.brand,
-          'sdkInt': android.version.sdkInt,
-          'androidVersion': android.version.release,
-          'isPhysicalDevice': android.isPhysicalDevice,
-        });
+
+    // ---- 3. install_source: đúng 1 lần/đời install (gate theo isNewInstall,
+    // KHÔNG theo !fromCache nữa → hết double-fire khi cache-miss lặp) ----
+    if (config.analyticsEnabled && isNewInstall) {
+      try {
+        await FirebaseAnalytics.instance.logEvent(
+          name: 'install_source',
+          parameters: {
+            'network': attribution.network,
+            'is_full_ads': isFullAds.toString(),
+            // Firebase giới hạn param value 100 ký tự.
+            if (attribution.referrer != null)
+              'referrer': attribution.referrer!.length > 100
+                  ? attribution.referrer!.substring(0, 100)
+                  : attribution.referrer!,
+          },
+        );
+        debugPrint('[InstallTracker] 📊 Analytics install_source đã gửi');
+      } catch (e) {
+        debugPrint('[InstallTracker] ✖ analytics install_source failed: $e');
       }
-
-      final packageInfo = await PackageInfo.fromPlatform();
-      // Pseudo user id của Firebase Analytics — join được với event/GA4.
-      final appInstanceId = await FirebaseAnalytics.instance.appInstanceId;
-
-      // Doc id ngày theo [config.dayUtcOffset]: '2026-08-17'.
-      final now = DateTime.now().toUtc().add(config.dayUtcOffset);
-      final dateId = '${now.year.toString().padLeft(4, '0')}-'
-          '${now.month.toString().padLeft(2, '0')}-'
-          '${now.day.toString().padLeft(2, '0')}';
-
-      final firestore = FirebaseFirestore.instance;
-      final dayDoc = firestore.collection(config.firestoreCollection).doc(dateId);
-      final installDoc = dayDoc.collection('installs').doc(deviceId);
-
-      // Batch = 1 round-trip, atomic: doc ngày (counter) + doc install.
-      final batch = firestore.batch();
-      batch.set(
-        dayDoc,
-        {
-          'date': dateId,
-          'installCount': FieldValue.increment(1),
-          'updatedAt': FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
-      batch.set(
-        installDoc,
-        {
-          'deviceId': deviceId,
-          'appInstanceId': appInstanceId,
-          // Kết quả tracker
-          'network': attribution.network,
-          'referrer': attribution.referrer,
-          'isFullAds': isFullAds,
-          // Timing
-          'totalDurationMs': totalDurationMs,
-          'referrerFetchMs': referrerFetchMs,
-          // Device
-          'device': deviceMeta,
-          // App
-          'appVersion': packageInfo.version,
-          'buildNumber': packageInfo.buildNumber,
-          'packageName': packageInfo.packageName,
-          if (config.flavor != null) 'flavor': config.flavor,
-          // Context
-          'locale': Platform.localeName,
-          'timezone': DateTime.now().timeZoneName,
-          'createdAt': FieldValue.serverTimestamp(),
-          ...config.extraFields,
-        },
-        SetOptions(merge: true),
-      );
-      await batch.commit().timeout(const Duration(seconds: 10));
-      debugPrint('[InstallTracker] 🔥 Firestore written → '
-          '${config.firestoreCollection}/$dateId/installs/$deviceId (count +1)');
-    } catch (e) {
-      debugPrint('[InstallTracker] ✖ firestore failed: $e '
-          '(check đã tạo database + publish rules chưa)');
     }
   }
 }
