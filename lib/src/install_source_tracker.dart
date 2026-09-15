@@ -117,13 +117,15 @@ class InstallSourceTracker {
 
     final attribution = classify(referrer, options);
 
-    // Emit TRƯỚC khi persist — quyết định đã có, không bắt luồng khởi động
-    // đợi 3 lần ghi disk (có thể bị nghẽn platform channel lúc startup).
-    _emit(attribution, onResolved);
+    // Persist TRƯỚC khi emit — bảo đảm cache đã ghi xong rồi mới báo kết quả.
+    // Nhờ vậy launch sau CHẮC CHẮN cache HIT (fromCache=true) → không cache-miss
+    // lặp → telemetry không log/đếm trùng install. Đánh đổi: thêm ~vài ms ghi
+    // disk vào luồng khởi động lần đầu (chỉ lần đầu; các launch sau đi nhánh
+    // cache HIT ở trên, không chạm đoạn này). _persist đã try/catch nên lỗi ghi
+    // không chặn được kết quả — vẫn emit bình thường bên dưới.
+    await _persist(prefs, attribution, referrer);
 
-    // Persist fire-and-forget. Nếu process chết trước khi ghi xong → launch
-    // sau đơn giản là cache MISS → đọc lại referrer (native đã cache raw).
-    unawaited(_persist(prefs, attribution, referrer));
+    _emit(attribution, onResolved);
   }
 
   Future<void> _persist(
