@@ -3,7 +3,7 @@ description: >-
   Track install source via Google Play Install Referrer (organic vs paid
   network) and decide full-ads mode. Replaces Adjust for attribution-based
   ad gating. Includes optional Firebase Analytics + Firestore telemetry.
-version: 0.1.0
+version: 0.2.0
 homepage: https://github.com/lequangkydev/flutter_install_tracker
 publish_to: none
 
@@ -19,9 +19,10 @@ dependencies:
   # thì không call tới; nhưng dep vẫn cần khai báo vì Dart import tĩnh).
   #
   # Constraint để RỘNG chủ đích: lib chỉ dùng API ổn định qua nhiều major
-  # (logEvent/setUserProperty/appInstanceId, collection/doc/batch,
-  # androidInfo, PackageInfo.fromPlatform) — mỗi app tự pin version cụ thể,
-  # lib không được là nguồn conflict khi các app dùng version khác nhau.
+  # (logEvent/setUserProperty/appInstanceId, collection/doc/batch/
+  # waitForPendingWrites, androidInfo, PackageInfo.fromPlatform) — mỗi app
+  # tự pin version cụ thể, lib không được là nguồn conflict khi các app dùng
+  # version khác nhau.
   firebase_analytics: ">=11.0.0 <14.0.0"
   cloud_firestore: ">=5.0.0 <8.0.0"
   device_info_plus: ">=9.0.0 <15.0.0"

@@ -17,7 +17,9 @@ class InstallAttribution {
   /// Raw referrer string từ Play (null nếu không đọc được).
   final String? referrer;
 
-  /// true → quyết định lấy từ cache (các launch sau lần đầu).
+  /// false CHỈ ở lần resolve thật (đọc referrer + persist) → app dùng cờ này
+  /// cho việc 1-lần-mỗi-install (vd log event). true khi quyết định lấy từ
+  /// cache (các launch sau) hoặc bị ép bởi `maxFull` (không resolve thật).
   final bool fromCache;
 
   @override

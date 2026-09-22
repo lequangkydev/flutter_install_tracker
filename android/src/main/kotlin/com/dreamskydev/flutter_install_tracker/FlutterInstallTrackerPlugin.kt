@@ -1,8 +1,10 @@
 package com.dreamskydev.flutter_install_tracker
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import com.android.installreferrer.api.InstallReferrerClient
 import com.android.installreferrer.api.InstallReferrerStateListener
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -29,9 +31,11 @@ import io.flutter.plugin.common.MethodChannel
  * Application.onCreate — FlutterEngine constructor auto-register plugins)
  * → app KHÔNG cần sửa MainApplication/MainActivity.
  *
- * Payload success: {referrer: String, clickTs: Long, installTs: Long,
- * fromCache: Boolean}. Trả null nếu API unavailable / lỗi (Dart side tự
- * phân loại theo options.useNull).
+ * Methods:
+ * - `getInstallReferrer` → {referrer: String, clickTs: Long, installTs: Long,
+ *   fromCache: Boolean}. Trả null nếu API unavailable / lỗi (Dart side tự
+ *   phân loại theo options.useNull).
+ * - `getAndroidId` → ANDROID_ID (String?) — key dedupe install cho telemetry.
  */
 class FlutterInstallTrackerPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
@@ -51,9 +55,25 @@ class FlutterInstallTrackerPlugin : FlutterPlugin, MethodChannel.MethodCallHandl
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "getInstallReferrer" -> fetch(applicationContext, result)
+            "getAndroidId" -> result.success(readAndroidId(applicationContext))
             else -> result.notImplemented()
         }
     }
+
+    /**
+     * ANDROID_ID — ổn định theo (máy, user, app-signing key) từ Android 8:
+     * sống qua cài lại / clear data, chỉ đổi khi factory reset → dedupe install
+     * trọn đời được. (device_info_plus `androidInfo.id` là Build.ID — tên bản
+     * firmware, hàng nghìn máy trùng nhau — KHÔNG dùng làm ID máy được.)
+     */
+    @SuppressLint("HardwareIds")
+    private fun readAndroidId(context: Context): String? =
+        try {
+            Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "read ANDROID_ID failed", e)
+            null
+        }
 
     private companion object {
         const val TAG = "InstallTracker"

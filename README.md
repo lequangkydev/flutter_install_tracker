@@ -59,7 +59,8 @@ await InstallTracker.initialize(
 {"maxFull":false,"useNull":true,"useEmpty":true,"useUnAttributed":true,"organicKeywords":["organic"]}
 ```
 
-- `maxFull` — kill-switch: mọi user full ads (không cache, tắt là hết hiệu lực)
+- `maxFull` — kill-switch: mọi user full ads (không cache, tắt là hết hiệu
+  lực). Callback `fromCache=true` → telemetry không tính là install mới
 - `useNull` / `useEmpty` / `useUnAttributed` — referrer null / rỗng / không
   nhận diện → coi là full ads? (default true — an toàn doanh thu)
 - `organicKeywords` — keyword trong `utm_medium` được coi là organic
@@ -69,16 +70,22 @@ Parse: `InstallTrackerOptions.fromJson(jsonDecode(rawJson))`.
 ## Telemetry
 
 **Analytics** (mọi app dùng chung Firebase project của chính nó):
-- `install_source` — 1 lần/install: network, is_full_ads, referrer
+- `install_source` — 1 lần ở lần resolve thật (`fromCache=false`): network,
+  is_full_ads, referrer. Không phụ thuộc Firestore.
 - `install_tracker_timing` — mọi launch: total_ms, referrer_fetch_ms
 - user property `install_network` — segment GA4 theo nguồn cài
 
-**Firestore** (1 write/install trọn đời):
+**Firestore** (1 batch/máy trọn đời, key = ANDROID_ID):
 ```
-install_tracker_logs/{yyyy-MM-dd}      ← installCount tổng theo ngày
-  └─ installs/{deviceId}               ← network, isFullAds, duration, device, version...
+install_tracker_logs/{yyyy-MM-dd}          ← installCount tổng theo ngày
+  └─ installs/{androidId}                  ← network, isFullAds, duration, device, version...
+install_tracker_logs_devices/{androidId}   ← marker dedupe (chỉ create)
 ```
 Ngày tính theo UTC+7 (đổi qua `dayUtcOffset`).
+
+Máy đã được đếm (clear data, cài lại) → marker đã tồn tại → rules từ chối
+**cả batch** → `installCount` không +1 trùng. Batch không cần quyền đọc và
+chạy được offline (SDK tự gửi khi có mạng, kể cả khi app bị kill trước đó).
 
 Cần tạo Firestore database + publish rules:
 
@@ -90,9 +97,15 @@ service cloud.firestore {
       allow create, update: if true;
       allow read, delete: if false;
       match /installs/{deviceId} {
+        // update: giữ cho các bản app cũ còn đang chạy
         allow create, update: if true;
         allow read, delete: if false;
       }
+    }
+    // Marker dedupe: CHỈ create — ghi lại = update → bị từ chối.
+    match /install_tracker_logs_devices/{deviceId} {
+      allow create: if true;
+      allow read, update, delete: if false;
     }
     match /{document=**} {
       allow read, write: if false;
@@ -100,6 +113,16 @@ service cloud.firestore {
   }
 }
 ```
+
+Đổi `firestoreCollection` thì đổi cả 2 tên trong rules: `<tên>` và
+`<tên>_devices`.
+
+> **Nâng cấp từ 0.1.x:** publish lại rules (thêm block
+> `install_tracker_logs_devices`) **trước** khi phát hành app. Thiếu block
+> này mọi batch bị từ chối → Firestore không ghi được gì (Analytics không
+> ảnh hưởng). Số liệu Firestore từ 0.1.x không tin được: doc `installs/`
+> cũ keyed theo Build.ID (tên bản firmware, nhiều máy trùng nhau) chứ không
+> phải ID máy.
 
 Tắt bớt: `InstallTrackerTelemetryConfig(firestoreEnabled: false)` hoặc bỏ
 hẳn param `telemetry`.

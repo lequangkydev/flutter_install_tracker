@@ -25,8 +25,16 @@ typedef InstallAttributionCallback = void Function(
 ///    event Firebase đúng 1 lần).
 /// 3. `options.maxFull` là override runtime — check TRƯỚC cache và KHÔNG
 ///    persist, để tắt cờ trên Remote Config là launch sau trở lại bình thường.
+///    Callback với `fromCache=true` vì đây không phải lần resolve thật.
+///
+/// Mỗi process chỉ resolve 1 lần: gọi [initialize] nhiều lần (kể cả khi lần
+/// đầu chưa xong) → callback nào cũng nhận cùng một kết quả.
 class InstallSourceTracker {
   InstallSourceTracker._();
+
+  /// Instance riêng, không chung state với [instance] — chỉ dùng trong test.
+  @visibleForTesting
+  InstallSourceTracker.forTesting();
 
   static final InstallSourceTracker instance = InstallSourceTracker._();
 
@@ -39,7 +47,8 @@ class InstallSourceTracker {
   static const String _prefsKeyNetwork = 'install_tracker_network';
   static const String _prefsKeyReferrer = 'install_tracker_referrer';
 
-  bool _initialized = false;
+  /// Lần resolve duy nhất của process — mọi lần gọi [initialize] dùng chung.
+  Future<InstallAttribution>? _resolving;
 
   /// Kết quả gần nhất (null nếu [initialize] chưa chạy xong).
   InstallAttribution? lastAttribution;
@@ -52,24 +61,29 @@ class InstallSourceTracker {
     InstallTrackerOptions options = const InstallTrackerOptions(),
     required InstallAttributionCallback onResolved,
   }) async {
-    if (_initialized) {
-      final last = lastAttribution;
-      if (last != null) {
-        onResolved(last);
-      }
-      return;
-    }
-    _initialized = true;
+    // _resolving gán đồng bộ (trước mọi await) → lần gọi tới khi lần đầu còn
+    // chờ native sẽ đợi chung kết quả, không bị bỏ rơi callback. options của
+    // các lần gọi sau bị bỏ qua.
+    final attribution = await (_resolving ??= _resolve(options));
+    onResolved(attribution);
+  }
+
+  Future<InstallAttribution> _resolve(InstallTrackerOptions options) async {
     debugPrint('[InstallTracker] ▶ initialize — options=${options.toJson()}');
 
     // Kill-switch: full ads cho tất cả — không cache để revert được từ xa.
+    // fromCache=true: KHÔNG phải lần resolve thật (không đọc referrer, không
+    // persist) → telemetry/app không coi mỗi launch là 1 install mới. Lần
+    // resolve thật diễn ra ở launch đầu tiên sau khi tắt cờ.
     if (options.maxFull) {
       debugPrint('[InstallTracker] maxFull=true → force full ads (no cache)');
-      _emit(
-        const InstallAttribution(isFullAds: true, network: 'max_full'),
-        onResolved,
+      return _finish(
+        const InstallAttribution(
+          isFullAds: true,
+          network: 'max_full',
+          fromCache: true,
+        ),
       );
-      return;
     }
 
     final prefs = await SharedPreferences.getInstance();
@@ -80,16 +94,14 @@ class InstallSourceTracker {
       debugPrint(
           '[InstallTracker] cache HIT → dùng quyết định đã chốt từ lần đầu '
           '(muốn test lại từ đầu: adb shell pm clear <package>)');
-      _emit(
+      return _finish(
         InstallAttribution(
           isFullAds: cachedIsFullAds,
           network: prefs.getString(_prefsKeyNetwork) ?? 'unknown',
           referrer: prefs.getString(_prefsKeyReferrer),
           fromCache: true,
         ),
-        onResolved,
       );
-      return;
     }
 
     debugPrint(
@@ -125,7 +137,7 @@ class InstallSourceTracker {
     // không chặn được kết quả — vẫn emit bình thường bên dưới.
     await _persist(prefs, attribution, referrer);
 
-    _emit(attribution, onResolved);
+    return _finish(attribution);
   }
 
   Future<void> _persist(
@@ -134,23 +146,23 @@ class InstallSourceTracker {
     String? referrer,
   ) async {
     try {
-      await prefs.setBool(_prefsKeyIsFullAds, attribution.isFullAds);
+      // Mỗi setX là 1 lần ghi riêng → key sentinel (isFullAds, thứ quyết định
+      // cache HIT) ghi CUỐI: process chết giữa chừng thì launch sau là cache
+      // MISS sạch, không HIT nửa vời ra network='unknown'.
       await prefs.setString(_prefsKeyNetwork, attribution.network);
       if (referrer != null) {
         await prefs.setString(_prefsKeyReferrer, referrer);
       }
+      await prefs.setBool(_prefsKeyIsFullAds, attribution.isFullAds);
     } catch (e) {
       debugPrint('[InstallTracker] ✖ persist failed: $e');
     }
   }
 
-  void _emit(
-    InstallAttribution attribution,
-    InstallAttributionCallback onResolved,
-  ) {
+  InstallAttribution _finish(InstallAttribution attribution) {
     lastAttribution = attribution;
     debugPrint('[InstallTracker] ✔ KẾT QUẢ: $attribution');
-    onResolved(attribution);
+    return attribution;
   }
 
   /// Phân loại referrer → (isFullAds, network). Pure function, static để
@@ -158,7 +170,7 @@ class InstallSourceTracker {
   ///
   /// Thứ tự ưu tiên:
   /// 1. null / empty → theo cờ useNull / useEmpty.
-  /// 2. Organic: `utm_medium` (hoặc utm_source) chứa organicKeywords
+  /// 2. Organic: `utm_medium` chứa organicKeywords
   ///    → KHÔNG full ads. (Play organic chuẩn:
   ///    `utm_source=google-play&utm_medium=organic`.)
   /// 3. Click-id của network lớn: gclid/gbraid/wbraid → google_ads,

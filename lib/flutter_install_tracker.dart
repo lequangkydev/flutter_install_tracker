@@ -31,10 +31,14 @@ export 'src/model/install_tracker_options.dart';
 
 /// Facade gọn: chạy tracker + đo thời gian trả kết quả + telemetry.
 ///
-/// `totalMs` = từ lúc gọi → `isFullAds` CÓ KẾT QUẢ (persist cache chạy nền,
-/// không tính).
+/// `totalMs` = từ lúc gọi → `isFullAds` CÓ KẾT QUẢ (lần đầu gồm cả persist
+/// cache — persist xong mới trả kết quả).
 class InstallTracker {
   InstallTracker._();
+
+  /// Telemetry chỉ chạy 1 lần/process: gọi [initialize] lại vẫn nhận callback
+  /// nhưng không log timing ~0ms / install_source lặp.
+  static bool _telemetryLogged = false;
 
   /// [fullAdsOverride]: ép cứng kết quả (vd từ
   /// `--dart-define=FULL_ADS=true/false` phía app) — attribution vẫn được
@@ -67,7 +71,8 @@ class InstallTracker {
 
         onResolved(attribution, isFullAds);
 
-        if (telemetry != null) {
+        if (telemetry != null && !_telemetryLogged) {
+          _telemetryLogged = true;
           // Fire-and-forget — không block luồng khởi động của app.
           unawaited(InstallTrackerTelemetry.log(
             config: telemetry,

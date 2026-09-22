@@ -9,8 +9,8 @@
 /// - [useEmpty]: referrer đọc được nhưng CHUỖI RỖNG → full ads?
 /// - [useUnAttributed]: referrer có nội dung nhưng không match pattern nào
 ///   (không organic, không network nhận diện được) → full ads?
-/// - [organicKeywords]: các keyword trong `utm_medium`/`utm_source` được coi
-///   là organic → KHÔNG full ads. Mặc định ['organic'].
+/// - [organicKeywords]: các keyword trong `utm_medium` được coi là organic
+///   → KHÔNG full ads. Mặc định ['organic'].
 class InstallTrackerOptions {
   const InstallTrackerOptions({
     this.maxFull = false,

@@ -1,7 +1,21 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_install_tracker/flutter_install_tracker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// Chạy [InstallSourceTracker.initialize] và trả về kết quả callback.
+Future<InstallAttribution> _resolve(
+  InstallSourceTracker tracker, [
+  InstallTrackerOptions options = const InstallTrackerOptions(),
+]) async {
+  InstallAttribution? result;
+  await tracker.initialize(options: options, onResolved: (a) => result = a);
+  return result!;
+}
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   const options = InstallTrackerOptions(); // default: useNull/Empty/UnAttributed=true
 
   group('InstallSourceTracker.classify', () {
@@ -139,6 +153,82 @@ void main() {
       expect(opts.useEmpty, true);
       expect(opts.useUnAttributed, true);
       expect(opts.organicKeywords, ['organic']);
+    });
+  });
+
+  group('InstallSourceTracker.initialize', () {
+    const channel = MethodChannel('flutter_install_tracker');
+    const organic = 'utm_source=google-play&utm_medium=organic';
+    late int nativeCalls;
+
+    void mockReferrer(String referrer) {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+        nativeCalls++;
+        return {'referrer': referrer};
+      });
+    }
+
+    setUp(() {
+      nativeCalls = 0;
+      SharedPreferences.setMockInitialValues({});
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    test('lần đầu đọc native + persist → launch sau cache HIT', () async {
+      mockReferrer(organic);
+
+      final first = await _resolve(InstallSourceTracker.forTesting());
+      expect(first.fromCache, false);
+      expect(first.network, 'organic');
+
+      // Launch sau = tracker mới, prefs giữ nguyên.
+      final next = await _resolve(InstallSourceTracker.forTesting());
+      expect(next.fromCache, true);
+      expect(next.isFullAds, false);
+      expect(next.network, 'organic');
+      expect(next.referrer, organic);
+      expect(nativeCalls, 1);
+    });
+
+    test('gọi lần 2 khi lần đầu chưa xong → cả 2 callback, native 1 lần',
+        () async {
+      mockReferrer('gclid=abc');
+      final tracker = InstallSourceTracker.forTesting();
+      final results = <InstallAttribution>[];
+
+      await Future.wait([
+        tracker.initialize(onResolved: results.add),
+        tracker.initialize(onResolved: results.add),
+      ]);
+
+      expect(results, hasLength(2));
+      expect(results.map((r) => r.network), everyElement('google_ads'));
+      expect(nativeCalls, 1);
+    });
+
+    test('maxFull → fromCache=true, không đọc native, không persist',
+        () async {
+      mockReferrer(organic);
+
+      final forced = await _resolve(
+        InstallSourceTracker.forTesting(),
+        const InstallTrackerOptions(maxFull: true),
+      );
+      expect(forced.isFullAds, true);
+      expect(forced.network, 'max_full');
+      expect(forced.fromCache, true);
+      expect(nativeCalls, 0);
+
+      // Tắt cờ → launch sau mới là lần resolve thật.
+      final real = await _resolve(InstallSourceTracker.forTesting());
+      expect(real.fromCache, false);
+      expect(real.network, 'organic');
+      expect(nativeCalls, 1);
     });
   });
 }
